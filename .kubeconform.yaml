@@ -1,0 +1,28 @@
+# Kubeconform configuration
+# Note: kubeconform doesn't support config files directly
+# This file documents the configuration used in CI for reference
+
+# Command line options used:
+# -strict                  Fail on additional properties in manifests
+# -ignore-missing-schemas  Don't fail on missing CRD schemas
+# -summary                 Print summary of validation results
+# -verbose                 Verbose output
+
+# Schema locations:
+# 1. Default Kubernetes schemas (built-in)
+# 2. CRDs-catalog for common operator CRDs:
+#    https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json
+
+# Known missing schemas (expected to be ignored):
+# - datasciencecluster.opendatahub.io (RHOAI custom resources)
+# - dscinitialization.opendatahub.io (RHOAI custom resources)
+# - operators.coreos.com (OLM resources)
+# - Some OpenShift-specific resources
+
+# To run locally:
+# kustomize build base/ | kubeconform \
+#   -strict \
+#   -ignore-missing-schemas \
+#   -schema-location default \
+#   -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+#   -summary

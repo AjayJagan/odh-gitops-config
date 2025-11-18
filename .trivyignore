@@ -1,0 +1,13 @@
+# Trivy Ignore File
+# Add rules here to suppress false positives or expected issues
+
+# Example: Ignore specific vulnerability IDs
+# CVE-2021-12345
+
+# Example: Ignore specific checks for operator manifests
+# Operators often need elevated privileges - these are expected
+# AVD-KSV-0001  # Process can elevate its own privileges
+# AVD-KSV-0012  # Runs as root user
+# AVD-KSV-0014  # Root file system is not read-only
+
+# Add your ignores below:

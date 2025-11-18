@@ -1,0 +1,52 @@
+---
+extends: default
+
+rules:
+  # Line length - allow longer lines for Kubernetes manifests
+  line-length:
+    max: 120
+    level: warning
+
+  # Indentation - enforce consistent 2-space indentation
+  indentation:
+    spaces: 2
+    indent-sequences: true
+
+  # Comments - require space after # but allow standalone #
+  comments:
+    min-spaces-from-content: 1
+
+  # Truthy values - allow yes/no for Kubernetes booleans
+  truthy:
+    allowed-values: ['true', 'false', 'yes', 'no', 'on', 'off']
+    check-keys: false
+
+  # Document start - not required for Kubernetes manifests
+  document-start:
+    present: false
+
+  # Empty lines - allow reasonable flexibility
+  empty-lines:
+    max: 2
+
+  # Trailing spaces - enforce no trailing spaces
+  trailing-spaces: enable
+
+  # Key duplicates - error on duplicate keys
+  key-duplicates: enable
+
+  # New line at end of file
+  new-line-at-end-of-file: enable
+
+  # Brackets and braces
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 0
+
+ignore: |
+  .git/
+  docs/
+  .validation/

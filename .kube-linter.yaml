@@ -1,0 +1,47 @@
+checks:
+  # Enable all built-in checks by default
+  addAllBuiltIn: true
+
+  # Exclude checks that are not applicable for operator manifests
+  exclude:
+    # Operators often need writable root filesystem
+    - "no-read-only-root-fs"
+
+    # Some operators require root privileges
+    - "run-as-non-root"
+
+    # Operators may need privilege escalation
+    - "privilege-escalation-container"
+
+    # Many Red Hat operators don't specify these
+    - "no-extensions-v1beta"
+
+  # Explicitly include critical security and reliability checks
+  include:
+    # Service configuration
+    - "dangling-service"
+    - "mismatching-selector"
+
+    # Security
+    - "writable-host-mount"
+    - "access-to-create-pods"
+    - "access-to-secrets"
+    - "unsafe-proc-mount"
+    - "unsafe-sysctls"
+    - "host-ipc"
+    - "host-network"
+    - "host-pid"
+
+    # Resource management
+    - "unset-cpu-requirements"
+    - "unset-memory-requirements"
+
+    # Best practices
+    - "latest-tag"
+    - "required-label-owner"
+    - "required-annotation-email"
+
+# Custom ignore patterns
+ignorePaths:
+  - ".git/"
+  - "docs/"

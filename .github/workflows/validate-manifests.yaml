@@ -1,0 +1,383 @@
+name: Validate GitOps Manifests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Validate Kustomize Manifests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kustomize
+      run: |
+        curl -s "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh" | bash
+        sudo mv kustomize /usr/local/bin/
+
+    - name: Install validation tools
+      run: |
+        # yamllint
+        pip install yamllint
+
+        # kubeconform
+        curl -sL https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz | tar xz
+        sudo mv kubeconform /usr/local/bin/
+
+        # kube-linter
+        curl -sL https://github.com/stackrox/kube-linter/releases/latest/download/kube-linter-linux.tar.gz | tar xz
+        sudo mv kube-linter /usr/local/bin/
+
+        # trivy
+        wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo tee /etc/apt/trusted.gpg.d/trivy.asc
+        echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+        sudo apt-get update
+        sudo apt-get install -y trivy
+
+    - name: YAML Lint
+      id: yamllint
+      run: |
+        echo "Running yamllint..."
+        if yamllint -c .yamllint.yaml . 2>&1 | tee /tmp/yamllint-output.txt; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=All YAML files are valid" >> $GITHUB_OUTPUT
+        else
+          # Get first error message
+          FIRST_ERROR=$(grep "error" /tmp/yamllint-output.txt | head -1 || echo "YAML syntax errors found")
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$FIRST_ERROR" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      continue-on-error: true
+
+    - name: Kustomize Build Validation
+      id: kustomize
+      run: |
+        echo "Validating kustomize builds..."
+
+        FAILED_LAYER=""
+        ERROR_MSG=""
+
+        if ! ERROR_MSG=$(kustomize build dependencies/operators/ 2>&1 > /tmp/operators.yaml); then
+          FAILED_LAYER="dependencies/operators"
+        elif ! ERROR_MSG=$(kustomize build dependencies/cluster-config/ 2>&1 > /tmp/cluster-config.yaml); then
+          FAILED_LAYER="dependencies/cluster-config"
+        elif ! ERROR_MSG=$(kustomize build base/ 2>&1 > /tmp/base.yaml); then
+          FAILED_LAYER="base"
+        elif ! ERROR_MSG=$(kustomize build components/ 2>&1 > /tmp/components.yaml); then
+          FAILED_LAYER="components"
+        elif ! ERROR_MSG=$(kustomize build services/ 2>&1 > /tmp/services.yaml); then
+          FAILED_LAYER="services"
+        fi
+
+        if [ -z "$FAILED_LAYER" ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=All 5 layers built successfully" >> $GITHUB_OUTPUT
+          echo "✅ All kustomize builds completed successfully"
+        else
+          # Extract first line of error
+          FIRST_ERROR=$(echo "$ERROR_MSG" | head -1)
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$FAILED_LAYER: $FIRST_ERROR" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "❌ Kustomize build failed"
+          exit 1
+        fi
+      continue-on-error: true
+
+    - name: Kubeconform - Schema Validation
+      id: kubeconform
+      run: |
+        echo "Running kubeconform schema validation..."
+
+        FAILED=0
+        # Validate each layer with OpenShift CRD support
+        for layer in operators cluster-config base components services; do
+          if [ -f "/tmp/${layer}.yaml" ]; then
+            echo "Validating ${layer}..."
+            if ! kubeconform \
+              -strict \
+              -ignore-missing-schemas \
+              -schema-location default \
+              -schema-location 'https://raw.githubusercontent.com/datreeio/CRDs-catalog/main/{{.Group}}/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json' \
+              -summary \
+              "/tmp/${layer}.yaml" 2>&1 | tee -a /tmp/kubeconform-output.txt; then
+              FAILED=1
+            fi
+          fi
+        done
+
+        if [ $FAILED -eq 0 ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=All resources conform to schemas" >> $GITHUB_OUTPUT
+        else
+          # Get first validation error
+          FIRST_ERROR=$(grep -E "validation failed|invalid" /tmp/kubeconform-output.txt | head -1 || echo "Schema validation errors found")
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$FIRST_ERROR" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      continue-on-error: true
+
+    - name: Kube-linter - Best Practices
+      id: kubelinter
+      run: |
+        echo "Running kube-linter for best practices..."
+
+        ISSUES=0
+        for layer in operators cluster-config base components services; do
+          if [ -f "/tmp/${layer}.yaml" ]; then
+            echo "Linting ${layer}..."
+            if ! kube-linter lint "/tmp/${layer}.yaml" --config .kube-linter.yaml 2>&1 | tee -a /tmp/kubelinter-output.txt; then
+              ISSUES=1
+            fi
+          fi
+        done
+
+        if [ $ISSUES -eq 0 ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=No best practice violations found" >> $GITHUB_OUTPUT
+        else
+          # Get first issue
+          FIRST_ISSUE=$(grep -E "Error:|object:" /tmp/kubelinter-output.txt | head -2 | tr '\n' ' ' || echo "Best practice issues found")
+          echo "status=warning" >> $GITHUB_OUTPUT
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$FIRST_ISSUE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+        fi
+      continue-on-error: true
+
+    - name: Trivy - Security Scanning
+      id: trivy
+      run: |
+        echo "Running trivy security scanning..."
+
+        FAILED=0
+        for layer in operators cluster-config base components services; do
+          if [ -f "/tmp/${layer}.yaml" ]; then
+            echo "Scanning ${layer}..."
+            if ! trivy config \
+              --severity HIGH,CRITICAL \
+              --exit-code 1 \
+              --ignorefile .trivyignore \
+              --skip-dirs .git \
+              "/tmp/${layer}.yaml" 2>&1 | tee -a /tmp/trivy-output.txt; then
+              FAILED=1
+            fi
+          fi
+        done
+
+        if [ $FAILED -eq 0 ]; then
+          echo "status=success" >> $GITHUB_OUTPUT
+          echo "message=No HIGH/CRITICAL security issues found" >> $GITHUB_OUTPUT
+        else
+          # Get first security issue
+          FIRST_ISSUE=$(grep -E "HIGH|CRITICAL" /tmp/trivy-output.txt | head -1 || echo "Security issues found")
+          echo "status=failed" >> $GITHUB_OUTPUT
+          echo "message<<EOF" >> $GITHUB_OUTPUT
+          echo "$FIRST_ISSUE" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          exit 1
+        fi
+      continue-on-error: true
+
+    - name: Create kind cluster
+      uses: helm/kind-action@v1
+      with:
+        cluster_name: validation
+        wait: 120s
+
+    - name: Install CRDs for validation
+      run: |
+        echo "Installing OpenShift AI Operator CRDs..."
+
+        # Install OLM if needed for CRD extraction
+        kubectl create -f https://raw.githubusercontent.com/operator-framework/operator-lifecycle-manager/master/deploy/upstream/quickstart/crds.yaml || true
+        kubectl create -f https://raw.githubusercontent.com/operator-framework/operator-lifecycle-manager/master/deploy/upstream/quickstart/olm.yaml || true
+
+        # Wait for OLM
+        kubectl wait --for=condition=ready pod -l app=olm-operator -n olm --timeout=180s || true
+        kubectl wait --for=condition=ready pod -l app=catalog-operator -n olm --timeout=180s || true
+
+        echo "Installing common CRDs..."
+        # Install CRDs that we can get without operator installation
+        # Note: This is best-effort - some CRDs won't be available in kind
+
+        # Kueue CRDs
+        kubectl apply --server-side -f https://github.com/kubernetes-sigs/kueue/releases/latest/download/manifests.yaml || true
+
+        echo "CRD installation complete (best-effort)"
+
+    - name: Dry-run Apply - Dependencies
+      run: |
+        echo "Testing dependencies layer deployment..."
+        kustomize build dependencies/operators/ | kubectl apply --dry-run=client -f - || true
+        kustomize build dependencies/cluster-config/ | kubectl apply --dry-run=client -f -
+
+    - name: Dry-run Apply - Base
+      run: |
+        echo "Testing base layer deployment..."
+        kustomize build base/ | kubectl apply --dry-run=client -f - || true
+
+    - name: Dry-run Apply - Components
+      run: |
+        echo "Testing components layer deployment..."
+        kustomize build components/ | kubectl apply --dry-run=client -f - || true
+
+    - name: Dry-run Apply - Services
+      run: |
+        echo "Testing services layer deployment..."
+        kustomize build services/ | kubectl apply --dry-run=client -f - || true
+
+    - name: Create PR Comment
+      if: always() && github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const checks = {
+            yamllint: {
+              status: '${{ steps.yamllint.outputs.status }}' || 'skipped',
+              message: '${{ steps.yamllint.outputs.message }}' || 'Not run'
+            },
+            kustomize: {
+              status: '${{ steps.kustomize.outputs.status }}' || 'skipped',
+              message: '${{ steps.kustomize.outputs.message }}' || 'Not run'
+            },
+            kubeconform: {
+              status: '${{ steps.kubeconform.outputs.status }}' || 'skipped',
+              message: '${{ steps.kubeconform.outputs.message }}' || 'Not run'
+            },
+            kubelinter: {
+              status: '${{ steps.kubelinter.outputs.status }}' || 'skipped',
+              message: '${{ steps.kubelinter.outputs.message }}' || 'Not run'
+            },
+            trivy: {
+              status: '${{ steps.trivy.outputs.status }}' || 'skipped',
+              message: '${{ steps.trivy.outputs.message }}' || 'Not run'
+            }
+          };
+
+          const hasFailures = Object.values(checks).some(c => c.status === 'failed');
+          const hasWarnings = Object.values(checks).some(c => c.status === 'warning');
+
+          let comment = '## GitOps Validation Results\n\n';
+
+          if (!hasFailures && !hasWarnings) {
+            comment += '### ✅ All validations passed!\n\n';
+          } else if (hasFailures) {
+            comment += '### ❌ Validation Failed\n\n';
+            comment += 'Please fix the issues below before merging.\n\n';
+          } else if (hasWarnings) {
+            comment += '### ⚠️ Validation Passed with Warnings\n\n';
+          }
+
+          comment += '| Check | Status | Message |\n';
+          comment += '|-------|--------|----------|\n';
+          comment += `| YAML Lint | ${checks.yamllint.status} | ${checks.yamllint.message} |\n`;
+          comment += `| Kustomize Build | ${checks.kustomize.status} | ${checks.kustomize.message} |\n`;
+          comment += `| Schema Validation | ${checks.kubeconform.status} | ${checks.kubeconform.message} |\n`;
+          comment += `| Best Practices | ${checks.kubelinter.status} | ${checks.kubelinter.message} |\n`;
+          comment += `| Security Scan | ${checks.trivy.status} | ${checks.trivy.message} |\n`;
+
+          comment += '\n<details><summary>ℹ️ What these checks do</summary>\n\n';
+          comment += '- **YAML Lint**: Validates YAML syntax and formatting\n';
+          comment += '- **Kustomize Build**: Ensures all kustomize overlays build correctly\n';
+          comment += '- **Schema Validation**: Validates against Kubernetes schemas\n';
+          comment += '- **Best Practices**: Checks for configuration best practices\n';
+          comment += '- **Security Scan**: Scans for security misconfigurations (HIGH/CRITICAL)\n';
+          comment += '\n</details>\n\n';
+
+          if (hasFailures) {
+            comment += '### 🔍 How to Fix\n\n';
+
+            if (yamllint === 'failed') {
+              comment += '**YAML Lint Errors:**\n';
+              comment += '```bash\n';
+              comment += '# Run locally to see errors:\n';
+              comment += 'yamllint -c .yamllint.yaml .\n';
+              comment += '```\n\n';
+            }
+
+            if (kustomize === 'failed') {
+              comment += '**Kustomize Build Errors:**\n';
+              comment += '```bash\n';
+              comment += '# Test each layer:\n';
+              comment += 'kustomize build dependencies/operators/\n';
+              comment += 'kustomize build dependencies/cluster-config/\n';
+              comment += 'kustomize build base/\n';
+              comment += 'kustomize build components/\n';
+              comment += 'kustomize build services/\n';
+              comment += '```\n\n';
+            }
+
+            if (kubeconform === 'failed') {
+              comment += '**Schema Validation Errors:**\n';
+              comment += 'Check the workflow logs for specific schema violations.\n\n';
+            }
+
+            if (trivy === 'failed') {
+              comment += '**Security Issues Found:**\n';
+              comment += '```bash\n';
+              comment += '# Run locally:\n';
+              comment += 'trivy config --severity HIGH,CRITICAL .\n';
+              comment += '```\n\n';
+            }
+          }
+
+          comment += '\n---\n';
+          comment += `🤖 *Validation run at ${new Date().toUTCString()}*`;
+
+          // Find existing comment
+          const { data: comments } = await github.rest.issues.listComments({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            issue_number: context.issue.number,
+          });
+
+          const botComment = comments.find(comment =>
+            comment.user.type === 'Bot' &&
+            comment.body.includes('GitOps Validation Results')
+          );
+
+          if (botComment) {
+            // Update existing comment
+            await github.rest.issues.updateComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              comment_id: botComment.id,
+              body: comment
+            });
+          } else {
+            // Create new comment
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: comment
+            });
+          }
+
+    - name: Fail if validation errors
+      if: always()
+      run: |
+        if [[ "${{ steps.yamllint.outputs.status }}" == "failed" ]] || \
+           [[ "${{ steps.kustomize.outputs.status }}" == "failed" ]] || \
+           [[ "${{ steps.kubeconform.outputs.status }}" == "failed" ]] || \
+           [[ "${{ steps.trivy.outputs.status }}" == "failed" ]]; then
+          echo "❌ Validation failed - see PR comment for details"
+          exit 1
+        fi
+        echo "✅ All critical validations passed"
