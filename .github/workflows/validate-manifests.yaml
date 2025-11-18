@@ -303,7 +303,7 @@ jobs:
           if (hasFailures) {
             comment += '### 🔍 How to Fix\n\n';
 
-            if (yamllint === 'failed') {
+            if (checks.yamllint.status === 'failed') {
               comment += '**YAML Lint Errors:**\n';
               comment += '```bash\n';
               comment += '# Run locally to see errors:\n';
@@ -311,7 +311,7 @@ jobs:
               comment += '```\n\n';
             }
 
-            if (kustomize === 'failed') {
+            if (checks.kustomize.status === 'failed') {
               comment += '**Kustomize Build Errors:**\n';
               comment += '```bash\n';
               comment += '# Test each layer:\n';
@@ -323,12 +323,12 @@ jobs:
               comment += '```\n\n';
             }
 
-            if (kubeconform === 'failed') {
+            if (checks.kubeconform.status === 'failed') {
               comment += '**Schema Validation Errors:**\n';
               comment += 'Check the workflow logs for specific schema violations.\n\n';
             }
 
-            if (trivy === 'failed') {
+            if (checks.trivy.status === 'failed') {
               comment += '**Security Issues Found:**\n';
               comment += '```bash\n';
               comment += '# Run locally:\n';
