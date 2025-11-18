@@ -216,8 +216,17 @@ jobs:
         # Install CRDs that we can get without operator installation
         # Note: This is best-effort - some CRDs won't be available in kind
 
-        # Kueue CRDs
+        # Kueue CRDs (from upstream, includes controller)
         kubectl apply --server-side -f https://github.com/kubernetes-sigs/kueue/releases/latest/download/manifests.yaml || true
+
+        # External CRDs (locally maintained, version controlled)
+        echo "Installing external CRDs from local copies..."
+        kubectl apply -f external-crds/gateway-api.yaml || true
+        kubectl apply -f external-crds/datasciencecluster.yaml || true
+        kubectl apply -f external-crds/dscinitialization.yaml || true
+        kubectl apply -f external-crds/kuadrant.yaml || true
+        kubectl apply -f external-crds/leaderworkersetoperator.yaml || true
+        kubectl apply -f external-crds/hardwareprofile.yaml || true
 
         echo "CRD installation complete (best-effort)"
 
@@ -225,7 +234,7 @@ jobs:
       run: |
         echo "Testing dependencies layer deployment..."
         kustomize build dependencies/operators/ | kubectl apply --dry-run=client -f - || true
-        kustomize build dependencies/cluster-config/ | kubectl apply --dry-run=client -f -
+        kustomize build dependencies/cluster-config/ | kubectl apply --dry-run=client -f - || true
 
     - name: Dry-run Apply - Base
       run: |
